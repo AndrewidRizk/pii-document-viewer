@@ -1,6 +1,7 @@
 import json
 import re
 import struct
+import zipfile
 from collections import Counter
 from html import escape
 from pathlib import Path
@@ -10,6 +11,7 @@ import pyarrow.parquet as pq
 root = Path(__file__).resolve().parent.parent
 data_dir = root / "data"
 out = root / "index.html"
+zip_out = root / "pii-dataset.zip"
 SPLITS = ("train", "validation", "test")
 COLORS = {
     "PERSON": "#e8590c", "EMAIL": "#1971c2", "PHONE": "#2b8a3e",
@@ -86,6 +88,43 @@ types = " · ".join(f"{n} {escape(t.replace('_', ' '))}s" for t, n in type_count
 splits = Counter(r["split"] for r in records)
 split_text = " / ".join(f"{splits[s]} {s}" for s in SPLITS)
 
+ZIP_README = f"""PII document images
+===================
+
+{len(records)} synthetic document images ({types.replace(" · ", ", ")};
+{split_text}) with labelled PII bounding boxes.
+
+Source:  https://huggingface.co/datasets/hussain-khalid/pii-dataset
+Licence: CC0-1.0
+
+All names, addresses, emails, phone numbers, ID numbers and dates of birth are
+synthetic. The dataset contains no real person's data.
+
+images/  The document images (PNG), unchanged from the dataset.
+data/    The label files (Parquet), one per split, unchanged from the dataset.
+         Each row is one image: id, image, width, height, doc_type, and
+         fields, a JSON list of {{label, text, bbox: [x0, y0, x1, y1]}}.
+"""
+
+
+def write_zip():
+    """Zip the dataset files. Stored, not compressed (PNG and Parquet already are),
+    with fixed dates and permissions, so a rebuild gives the same bytes."""
+    entries = [("README.txt", ZIP_README.encode())]
+    entries += [(r["image"], (root / r["image"]).read_bytes()) for r in records]
+    entries += [(f"data/{s}-00000-of-00001.parquet", (data_dir / f"{s}-00000-of-00001.parquet").read_bytes()) for s in SPLITS]
+    with zipfile.ZipFile(zip_out, "w", zipfile.ZIP_STORED) as z:
+        for name, data in entries:
+            info = zipfile.ZipInfo(f"pii-dataset/{name}", date_time=(2026, 1, 1, 0, 0, 0))
+            info.create_system = 3  # Unix, so external_attr is read as a file mode
+            info.external_attr = 0o100644 << 16  # regular file, rw-r--r--, never executable
+            z.writestr(info, data)
+    return len(entries)
+
+
+zip_entries = write_zip()
+zip_size = zip_out.stat().st_size
+
 html = f"""<!doctype html>
 <html lang="en">
 <head>
@@ -103,6 +142,11 @@ header {{ padding:20px 24px 8px; }}
 h1 {{ font-size:20px; margin:0 0 4px; }}
 p {{ margin:0 0 4px; color:var(--muted); }}
 a {{ color:var(--accent); }}
+.dl {{ display:flex; flex-wrap:wrap; gap:4px 12px; align-items:center; margin:12px 0 4px; }}
+.dl a {{ display:inline-block; padding:7px 14px; border-radius:6px; background:var(--accent); color:var(--bg); font-weight:600; text-decoration:none; }}
+.dl a:hover {{ filter:brightness(1.1); }}
+.dl a:focus-visible {{ outline:2px solid var(--accent); outline-offset:2px; }}
+.dl span {{ color:var(--muted); font-size:13px; }}
 .bar {{ display:flex; flex-wrap:wrap; gap:6px 16px; align-items:center; padding:10px 24px; border-bottom:1px solid var(--line); position:sticky; top:0; background:var(--bg); z-index:1; font-size:13px; }}
 .bar i {{ font-style:normal; color:var(--muted); }}
 .bar label {{ margin-left:auto; display:flex; gap:6px; align-items:center; cursor:pointer; }}
@@ -128,6 +172,7 @@ li b {{ font-weight:600; font-size:11px; color:var(--muted); margin-right:4px; }
 <h1>PII document images</h1>
 <p>{len(records)} synthetic document images ({types}; {split_text}) with labelled PII bounding boxes. CC0-1.0.</p>
 <p>Source: <a href="https://huggingface.co/datasets/hussain-khalid/pii-dataset" target="_blank" rel="noopener noreferrer">https://huggingface.co/datasets/hussain-khalid/pii-dataset</a></p>
+<div class="dl"><a href="{zip_out.name}" download>Download dataset (.zip, {zip_size / 1e6:.1f} MB)</a><span>{len(records)} PNG images, {len(SPLITS)} Parquet label files and a README</span></div>
 </header>
 <div class="bar">{legend}<label><input type="checkbox" id="show" checked> Show boxes</label></div>
 <main>
@@ -140,3 +185,4 @@ out.write_text(html, encoding="utf-8", newline="\n")
 print(f"images={len(records)} splits={dict(splits)} types={dict(type_counts)} labels={dict(label_counts)}")
 print(f"problems={len(problems)}", *problems[:10], sep="\n")
 print(f"wrote {out} ({out.stat().st_size / 1e3:.0f} KB)")
+print(f"wrote {zip_out} ({zip_entries} files, {zip_size / 1e6:.1f} MB)")
